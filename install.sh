@@ -5,6 +5,12 @@
 # Claude Code reads .claude/skills, Codex reads .agents/skills; the link makes both read the same folder.
 # Run it again to update. Then start a new chat and say /handoff in Claude Code or $handoff in Codex.
 set -euo pipefail
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*)   # Git Bash on Windows: no real links here, and no python3
+  dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && (pwd -W 2>/dev/null || pwd))"
+  echo "install.sh: on Windows, run install.ps1 in PowerShell instead:"
+  echo "  powershell -ExecutionPolicy Bypass -File \"$dir/install.ps1\""
+  exit 1;;
+esac
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 src="$here/handoff"
 if [ "${1:-}" = "--project" ]; then

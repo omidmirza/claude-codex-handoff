@@ -10,9 +10,9 @@ Type one word and the same chat opens in the other app. Nothing to explain again
 - In Claude Code: type `/handoff` (or say "continue this chat in Codex").
 - In Codex: type `$handoff` (or say "bring this chat back to Claude Code").
 - A chat sent to Codex shows up in the Codex app's list. On the way back, Codex prints two lines: paste
-  the one for your app into Terminal (one opens Claude Code in Terminal, the other the Claude app).
+  the one for your app into Terminal or PowerShell (one opens Claude Code, the other the Claude app).
 
-## Set it up (once)
+## Set it up on a Mac (once)
 
 1. Open Terminal (press ⌘+Space, type Terminal, press Return).
 2. Paste these two lines and press Return:
@@ -23,9 +23,22 @@ Type one word and the same chat opens in the other app. Nothing to explain again
    Have the folder already? Type `bash ` (with a space), drag `install.sh` into Terminal, press Return.
 3. Start a new chat in Claude Code or Codex.
 
-You need a Mac with Claude Code and Codex (CLI 0.166 or later) installed. If a window asks to install
-developer tools, click Install, then paste the lines again.
+You need Claude Code and Codex (CLI 0.166 or later). If a window asks to install developer tools,
+click Install, then paste the lines again.
 For one project only: `bash claude-codex-handoff/install.sh --project /path/to/project`.
+
+## Set it up on Windows (once)
+
+1. Open PowerShell (press the Windows key, type PowerShell, press Enter).
+2. Paste these two lines and press Enter:
+   ```powershell
+   git clone https://github.com/omidmirza/claude-codex-handoff.git
+   powershell -ExecutionPolicy Bypass -File claude-codex-handoff\install.ps1
+   ```
+3. Start a new chat in Claude Code or Codex.
+
+You need Claude Code, Codex, Git and Python ([python.org](https://www.python.org/downloads/)).
+New: not yet tried on a Windows PC.
 
 ## Two real tests
 
@@ -52,8 +65,8 @@ Cruise control:
 
 ## What is in here
 
-- `install.sh`: puts the `handoff` folder where Claude Code looks (`.claude/skills`) and a link to it
-  where Codex looks (`.agents/skills`), so both apps use the same copy.
+- `install.sh` (Mac), `install.ps1` (Windows): put the `handoff` folder where Claude Code looks
+  (`.claude/skills`) and a link to it where Codex looks (`.agents/skills`), so both apps use the same copy.
 - `handoff/SKILL.md`: tells the app when and how to hand a chat over (a "skill").
 - `handoff/scripts/handoff.py`: does the copying. To Codex it uses Codex's own import; to Claude Code it
   writes a new chat. Run again, it adds only the new messages.

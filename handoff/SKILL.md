@@ -18,6 +18,8 @@ Run the script in this skill's `scripts/` folder, from the project folder:
 | Codex | this chat in Claude Code | `python3 <this skill's folder>/scripts/handoff.py to-claude` |
 | either | the chats of both agents here | `python3 <this skill's folder>/scripts/handoff.py list` |
 
+On Windows, use `py -3` (or `python`) instead of `python3`.
+
 Add an id to pick another chat: a Claude Code session id for `to-codex`, a Codex thread id for
 `to-claude`. Without one, `to-codex` takes the chat you are in and `to-claude` the newest Codex
 thread in the folder.
@@ -25,7 +27,8 @@ thread in the folder.
 Then tell the user in a few short lines what the script printed: the chat it copied, and the lines
 that open it, exactly as printed (each starts with `cd`, so it works from any folder). A chat sent
 to Codex also shows in the Codex app's list. A chat sent to Claude Code opens with one of the two
-printed lines, pasted into Terminal: one for Claude Code in Terminal, one for the Claude app.
+printed lines, pasted into Terminal (PowerShell on Windows): one for Claude Code there, one for the
+Claude app.
 
 If `to-codex` says Codex left its copy as it is, someone continued that copy in Codex, and Codex
 then stops adding messages to it. Offer the two choices it printed: continue in that Codex chat,

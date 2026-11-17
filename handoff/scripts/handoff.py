@@ -16,6 +16,7 @@ Needs Python 3.9+ and the codex CLI (0.166 or later) on the PATH.
 import argparse
 import datetime as dt
 import json
+import ntpath
 import os
 import queue
 import re
@@ -29,7 +30,8 @@ import uuid
 from pathlib import Path
 
 HOME = Path.home()
-CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or HOME / ".claude")
+WINDOWS = os.name == "nt"
+CLAUDE =Path(os.environ.get("CLAUDE_CONFIG_DIR") or HOME / ".claude")
 CODEX_HOME = Path(os.environ.get("CODEX_HOME") or HOME / ".codex")
 STATE = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local" / "state") / "handoff"
 LEDGER = STATE / "ledger.json"
@@ -46,11 +48,54 @@ def die(msg):
 
 
 def home(p):
-    return str(p).replace(str(HOME), "~", 1)
+    s, h = str(p), str(HOME)
+    if WINDOWS and ntpath.normcase(s).startswith(ntpath.normcase(h)):  # Windows paths ignore case
+        return "~" + s[len(h):]
+    return s.replace(h, "~", 1)
 
 
 def here(path):
+    """The folder as the agents record it: the real path; on Windows the full path as typed (as Node has it)."""
+    if WINDOWS:
+        p = os.path.abspath(path)
+        return p[4:] if p.startswith("\\\\?\\") else p
     return os.path.realpath(path)
+
+
+def tool(name):
+    """The command to start. On Windows its full path, from PATH only (never the current folder) and with PATHEXT
+    (npm installs codex.cmd); elsewhere the plain name, as the shell would run it."""
+    if not WINDOWS:
+        return name
+    exts = [e for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if d.strip() in ("", "."):
+            continue
+        for e in exts:
+            p = ntpath.join(d, name + e)
+            if os.path.isfile(p):
+                return p
+    return name
+
+
+def paste(cwd, prog, args):
+    """A line to paste into a terminal: go to the folder, then run the program. On Windows for PowerShell: no &&
+    (5.1 has none), -LiteralPath (a [ in a name is no wildcard), and prog.cmd where npm put a shim (PowerShell would
+    pick its .ps1, which Windows blocks by default)."""
+    if WINDOWS:
+        if tool(prog).lower().endswith(".cmd"):
+            prog += ".cmd"
+        q = "".join(c * 2 if c in "'‘’‚‛" else c for c in cwd)  # PowerShell's quote marks
+        return f"cd -LiteralPath '{q}'; {prog} {args}"
+    return f"cd {shlex.quote(cwd)} && {prog} {args}"
+
+
+def same_path(a, b):
+    """Equal paths; on Windows ignoring case and a \\\\?\\ prefix."""
+    if not WINDOWS:
+        return a == b
+    norm = lambda s: ntpath.normcase(s[4:] if s.startswith("\\\\?\\") else s)
+    return isinstance(a, str) and norm(a) == norm(b)
 
 
 # ---------- Codex: talk to its app server (JSON-RPC over stdio) ----------
@@ -58,8 +103,8 @@ def here(path):
 class Codex:
     def __init__(self):
         try:
-            self.p = subprocess.Popen(["codex", "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                      stderr=subprocess.PIPE, text=True, bufsize=1)
+            self.p = subprocess.Popen([tool("codex"), "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, encoding="utf-8", errors="replace", bufsize=1)
         except FileNotFoundError:
             die("the codex command is not on the PATH")
         self.q, self.n, self.notes, self.err = queue.Queue(), 0, [], []
@@ -136,6 +181,13 @@ class Codex:
                 return msg["params"]
 
     def close(self):
+        if WINDOWS:  # terminate() is a hard kill there: let the server see the end of its input and stop
+            try:
+                self.p.stdin.close()
+                self.p.wait(timeout=5)
+                return
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         self.p.terminate()
 
     def threads(self, cwd, limit=10):
@@ -214,9 +266,19 @@ def claude_cwd(cwd):
 
 
 def project_dir(cwd):
-    """Claude Code's folder for a project: every non-ASCII-alphanumeric UTF-16 unit becomes '-';
+    """Claude Code's folder for a project (see claude_folder). On Windows, if there is none for the path as typed,
+    the one for the resolved path (a subst or mapped drive), when that exists."""
+    d = claude_folder(claude_cwd(cwd))
+    if WINDOWS and not d.is_dir():
+        alt = claude_folder(unicodedata.normalize("NFC", os.path.realpath(cwd)))
+        if alt.is_dir():
+            return alt
+    return d
+
+
+def claude_folder(path):
+    """Claude Code's folder for a project path: every non-ASCII-alphanumeric UTF-16 unit becomes '-';
     names over 200 characters are cut and get '-' plus a base-36 hash of the path."""
-    path = claude_cwd(cwd)
     raw = path.encode("utf-16-le")
     units = [int.from_bytes(raw[i:i + 2], "little") for i in range(0, len(raw), 2)]
     name = "".join(chr(u) if 48 <= u <= 57 or 65 <= u <= 90 or 97 <= u <= 122 else "-" for u in units)
@@ -309,16 +371,39 @@ def resume_leaf(entries):
     return leaf
 
 
+def pid_running(pid):
+    """Windows only: True when a process with this id runs. os.kill(pid, 0) is no test there (it sends Ctrl+C)."""
+    import ctypes
+    from ctypes import wintypes
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.OpenProcess.restype = wintypes.HANDLE
+    k.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    k.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    k.CloseHandle.argtypes = (wintypes.HANDLE,)
+    h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return ctypes.get_last_error() == 5  # access denied: it runs, as another user
+    try:
+        code = wintypes.DWORD()
+        return bool(k.GetExitCodeProcess(h, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+    finally:
+        k.CloseHandle(h)
+
+
 def claude_live(sid):
     """True when this chat is the one running the script, or is open in a running Claude Code process."""
     if os.environ.get("CLAUDE_CODE_SESSION_ID") == sid:
         return True
     for f in (CLAUDE / "sessions").glob("*.json"):
         try:
-            d = json.loads(f.read_text())
+            d = json.loads(f.read_text(encoding="utf-8"))
             if d.get("sessionId") != sid:
                 continue
             pid = int(d.get("pid"))
+            if WINDOWS:  # no ps there; a reused pid only means that a fresh copy is written
+                if pid_running(pid):
+                    return True
+                continue
             os.kill(pid, 0)
         except PermissionError:
             return True
@@ -335,7 +420,8 @@ def claude_live(sid):
 
 def claude_version():
     try:
-        out = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=20).stdout
+        out = subprocess.run([tool("claude"), "--version"], capture_output=True, encoding="utf-8", errors="replace",
+                             timeout=20).stdout
         return out.split()[0]
     except Exception:
         return "2.1.0"
@@ -343,8 +429,8 @@ def claude_version():
 
 def git_branch(cwd):
     try:
-        return subprocess.run(["git", "-C", cwd, "branch", "--show-current"], capture_output=True, text=True,
-                              timeout=10).stdout.strip()
+        return subprocess.run([tool("git"), "-C", cwd, "branch", "--show-current"], capture_output=True,
+                              encoding="utf-8", errors="replace", timeout=10).stdout.strip()
     except Exception:
         return ""
 
@@ -359,7 +445,7 @@ def iso(t):
 
 def load_ledger():
     try:
-        return json.loads(LEDGER.read_text())
+        return json.loads(LEDGER.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
@@ -367,20 +453,29 @@ def load_ledger():
 def save_ledger(data):
     STATE.mkdir(parents=True, exist_ok=True)
     tmp = LEDGER.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=1))
-    tmp.replace(LEDGER)
+    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    tries = 10 if WINDOWS else 1  # Windows refuses while another program (a scanner, a sync) has the file open
+    for i in range(tries):
+        try:
+            tmp.replace(LEDGER)
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.1)
 
 
 def codex_records():
     try:
-        return json.loads((CODEX_HOME / "external_agent_session_imports.json").read_text()).get("records", [])
+        return json.loads((CODEX_HOME / "external_agent_session_imports.json").read_text(encoding="utf-8")
+                          ).get("records", [])
     except (OSError, ValueError):
         return []
 
 
 def codex_imported(path):
     """The Codex thread that Codex's importer already made from this Claude chat, if any."""
-    hits = [r for r in codex_records() if r.get("source_path") == str(path)]
+    hits = [r for r in codex_records() if same_path(r.get("source_path"), str(path))]
     return hits[-1].get("imported_thread_id") if hits else None
 
 
@@ -393,7 +488,7 @@ def fork_claude(path, entries, title):
     """A copy of a Claude Code chat under a new id, in the same folder (what `claude --fork-session` does)."""
     sid = str(uuid.uuid4())
     out = path.parent / f"{sid}.jsonl"
-    with open(out, "w", encoding="utf-8") as f:
+    with open(out, "w", encoding="utf-8", newline="\n") as f:
         for e in entries:
             if "sessionId" in e:
                 e = dict(e, sessionId=sid)
@@ -449,7 +544,7 @@ def to_codex(args):
     save_ledger(led)
     print(f"{'Updated' if again else 'Copied'} Claude Code chat \"{title}\" to Codex.")
     print(f"  Codex thread: {tid}")
-    print(f"  Continue:     cd {shlex.quote(cwd)} && codex resume {tid}   (or open it in the Codex app)")
+    print(f"  Continue:     {paste(cwd, 'codex', f'resume {tid}')}   (or open it in the Codex app)")
 
 
 def to_claude(args):
@@ -536,7 +631,7 @@ def to_claude(args):
             print(f"  {note}")
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
         for e in lines:
             f.write(json.dumps(e, ensure_ascii=False) + "\n")
     led[key] = {"claude_session": sid, "claude_file": str(path), "title": title,
@@ -548,8 +643,10 @@ def to_claude(args):
     if note:
         print(f"  {note}")
     print(f"  Claude chat: {sid}")
-    print(f"  Open it in Terminal:   cd {shlex.quote(cwd)} && claude --resume {sid}")
-    print(f"  Or in the Claude app:  cd {shlex.quote(cwd)} && claude --desktop --resume {sid}")
+    where = "Open it in " + ("PowerShell" if WINDOWS else "Terminal") + ":"
+    print(f"  {where:<22} {paste(cwd, 'claude', f'--resume {sid}')}")
+    if sys.platform in ("darwin", "win32"):  # where the Claude app runs
+        print(f"  Or in the Claude app:  {paste(cwd, 'claude', f'--desktop --resume {sid}')}")
 
 
 def list_chats(args):
@@ -565,12 +662,15 @@ def list_chats(args):
     for t in codex.threads(cwd, 5):
         link = led.get(f"codex:{t['id']}", {}).get("claude_session")
         name = t.get("name") or ((t.get("preview") or "").splitlines() or [""])[0]
-        when = dt.datetime.fromtimestamp(t.get("updatedAt") or 0).strftime("%d %b %H:%M")
+        when = dt.datetime.fromtimestamp(t["updatedAt"]).strftime("%d %b %H:%M") if t.get("updatedAt") else "?"
         print(f"  {t['id']}  {when}  {name[:50]}" + (f"  -> Claude {link}" if link else ""))
     codex.close()
 
 
 def main():
+    if WINDOWS:  # agents read the output through a pipe: send UTF-8, not the old code page
+        for s in (sys.stdout, sys.stderr):
+            s.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(prog="handoff", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name, fn in (("to-codex", to_codex), ("to-claude", to_claude), ("list", list_chats)):
